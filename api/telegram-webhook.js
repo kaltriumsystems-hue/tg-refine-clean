@@ -8,6 +8,7 @@ export const config = {
   runtime: "nodejs",
 };
 
+
 // --- Клиенты и токены ---
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
