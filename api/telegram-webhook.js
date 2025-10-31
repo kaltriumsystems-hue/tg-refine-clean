@@ -5,7 +5,7 @@ import PDFDocument from "pdfkit";
 
 // --- Конфигурация ---
 export const config = {
-  runtime: "nodejs20.x",
+  runtime: "nodejs",
 };
 
 // --- Клиенты и токены ---
