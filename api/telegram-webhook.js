@@ -1,6 +1,7 @@
 // Включаем Node.js runtime (иначе pdf-parse не сработает)
 export const config = { runtime: "nodejs" };
 
+
 // === Импорты ===
 import fetch from "node-fetch";
 import { OpenAI } from "openai";
