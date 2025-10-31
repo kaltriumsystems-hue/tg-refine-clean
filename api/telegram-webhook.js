@@ -1,187 +1,146 @@
-// /api/telegram-webhook.js  (ESM)
+// Включаем Node.js runtime (иначе pdf-parse не сработает)
+export const config = { runtime: 'nodejs20.x' };
 
-import PDFDocument from "pdfkit";
+// === Импорты ===
+import fetch from "node-fetch";
+import { OpenAI } from "openai";
 import pdfParse from "pdf-parse";
-import OpenAI from "openai";
+import PDFDocument from "pdfkit";
 
-const TG_TOKEN = process.env.TG_BOT_TOKEN;
-const TG_API = `https://api.telegram.org/bot${TG_TOKEN}`;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+// === Инициализация OpenAI ===
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-const ai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+// === Telegram API ===
+const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
-// -- tiny utils
-const countWords = (t) => (String(t || "").match(/\S+/g) || []).length;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
+// Отправка текстового сообщения
 async function tgSendMessage(chatId, text) {
   try {
-    await fetch(`${TG_API}/sendMessage`, {
+    await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, text }),
     });
-  } catch { /* ignore */ }
+  } catch (e) {
+    console.error("[TG] sendMessage error:", e);
+  }
 }
 
-async function tgSendDocument(chatId, buf, filename = "report.pdf") {
-  const form = new FormData();
-  form.append("chat_id", String(chatId));
-  form.append("document", new Blob([buf], { type: "application/pdf" }), filename);
+// Отправка PDF-документа
+async function tgSendDocument(chatId, buffer, filename = "report.pdf") {
+  try {
+    const formData = new FormData();
+    formData.append("chat_id", chatId);
+    formData.append("document", new Blob([buffer]), filename);
 
-  await fetch(`${TG_API}/sendDocument`, { method: "POST", body: form });
+    await fetch(`${TELEGRAM_API}/sendDocument`, {
+      method: "POST",
+      body: formData,
+    });
+  } catch (e) {
+    console.error("[TG] sendDocument error:", e);
+  }
 }
 
-async function downloadTelegramFile(file_id) {
-  // 1) getFile -> { file_path }
-  const get = await fetch(`${TG_API}/getFile`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ file_id }),
-  });
-  const j = await get.json();
-  const path = j?.result?.file_path;
-  if (!path) throw new Error("File path missing from Telegram API");
-
-  // 2) fetch the file binary
-  const url = `https://api.telegram.org/file/bot${TG_TOKEN}/${path}`;
-  const binRes = await fetch(url);
-  if (!binRes.ok) throw new Error(`Fetch file failed: ${binRes.status}`);
-  const ab = await binRes.arrayBuffer();
-  return new Uint8Array(ab);
+// Скачивание файла из Telegram
+async function downloadTelegramFile(fileId) {
+  const res = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
+  const data = await res.json();
+  if (!data.ok) throw new Error("Cannot get Telegram file path");
+  const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${data.result.file_path}`;
+  const fileRes = await fetch(fileUrl);
+  return Buffer.from(await fileRes.arrayBuffer());
 }
 
-async function extractTextFromPdf(uint8) {
-  const parsed = await pdfParse(uint8);
-  const text = String(parsed?.text || "")
-    .replace(/\u0000/g, "")
-    .replace(/[ \t]+/g, " ")
-    .trim();
-  return text;
-}
-
-async function refineTextWithAI(text) {
-  if (!ai) return { refined: text, notes: "AI disabled (no OPENAI_API_KEY)" };
-
-  const sys =
-    "You are a professional copy editor. Fix grammar, clarity and tone. Keep original meaning. Keep length similar.";
-  const user = `Edit the following text. Return ONLY the edited text.\n\n${text}`;
-
-  const resp = await ai.responses.create({
+// Обработка текста через OpenAI
+async function refine(text) {
+  const prompt = `Proofread and slightly refine this text for clarity and style, preserving meaning:\n\n${text}`;
+  const completion = await client.chat.completions.create({
     model: "gpt-4o-mini",
-    input: [
-      { role: "system", content: sys },
-      { role: "user", content: user },
-    ],
-    temperature: 0.2,
+    messages: [{ role: "user", content: prompt }],
   });
-
-  const refined = resp?.output_text?.trim() || text;
-  return { refined, notes: "" };
+  return { refined_text: completion.choices[0].message.content.trim() };
 }
 
-function buildPdfReport({ original, refined }) {
+// Построение PDF-отчёта
+async function buildPdfReport({ originalText, refinedText }) {
   return new Promise((resolve) => {
-    const doc = new PDFDocument({ margin: 40, size: "A4" });
+    const doc = new PDFDocument();
     const chunks = [];
-    doc.on("data", (c) => chunks.push(c));
+    doc.on("data", (chunk) => chunks.push(chunk));
     doc.on("end", () => resolve(Buffer.concat(chunks)));
 
-    doc.fontSize(16).text("Proofreader Report", { align: "center" });
+    doc.fontSize(16).text("Proofreading Report", { align: "center" });
     doc.moveDown();
-
-    doc.fontSize(11).text("Original:", { underline: true });
-    doc.moveDown(0.3);
-    doc.fontSize(11).text(original || "(empty)");
-    doc.moveDown();
-
-    doc.fontSize(11).text("Refined:", { underline: true });
-    doc.moveDown(0.3);
-    doc.fontSize(11).text(refined || "(empty)");
-
+    doc.fontSize(12).text("Original text:", { underline: true });
+    doc.moveDown(0.5);
+    doc.text(originalText);
+    doc.addPage();
+    doc.fontSize(12).text("Refined text:", { underline: true });
+    doc.moveDown(0.5);
+    doc.text(refinedText);
     doc.end();
   });
 }
 
+// === Основной обработчик ===
 export default async function handler(req, res) {
   try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ ok: false, error: "Method Not Allowed" });
-    }
+    const update = req.body || (await req.json?.());
+    console.log("[TG] update got");
 
-    const update = req.body || {};
-    const msg = update.message || update.edited_message;
-    const chatId = msg?.chat?.id;
-    const text = msg?.text;
+    const msg = update?.message || update?.edited_message;
     const doc = msg?.document;
 
-    if (!chatId) return res.status(200).json({ ok: true });
+    // === PDF-файлы ===
+    if (doc && (doc.mime_type?.includes("pdf") || doc.file_name?.endsWith(".pdf"))) {
+      console.log("[TG] PDF branch start");
+      await tgSendMessage(msg.chat.id, "Файл получен, извлекаю текст…");
 
-    // command /ping — быстрый тест соединения
-    if (String(text || "").trim().toLowerCase() === "ping") {
-      await tgSendMessage(chatId, "✅ Принято: «ping»");
-      return res.status(200).json({ ok: true });
-    }
-
-    // === PDF flow ===
-    if (doc && (doc?.mime_type?.includes("pdf") || (doc?.file_name || "").toLowerCase().endsWith(".pdf"))) {
-      await tgSendMessage(chatId, "Файл получен, извлекаю текст…");
-
-      // 1) скачать PDF
       const bin = await downloadTelegramFile(doc.file_id);
+      const parsed = await pdfParse(bin);
+      const original = String(parsed?.text || "").replace(/\u0000/g, "").trim();
 
-      // 2) извлечь текст
-      const original = await extractTextFromPdf(bin);
       if (!original) {
-        await tgSendMessage(chatId, "Не удалось извлечь текст из PDF (возможно, скан).");
+        await tgSendMessage(msg.chat.id, "Не удалось извлечь текст (возможно, это скан).");
         return res.status(200).json({ ok: true });
       }
 
-      // 3) лимит
-      if (countWords(original) > 1100) {
-        await tgSendMessage(chatId, "⚠️ В PDF >1100 слов. Раздели документ и отправь частями.");
-        return res.status(200).json({ ok: true });
-      }
+      await tgSendMessage(msg.chat.id, "Обрабатываю текст через редактор…");
+      const out = await refine(original);
+      const pdf = await buildPdfReport({
+        originalText: original,
+        refinedText: out.refined_text,
+      });
 
-      await tgSendMessage(chatId, "Обрабатываю текст через редактор…");
-
-      // 4) правка AI
-      const { refined } = await refineTextWithAI(original);
-
-      // 5) PDF отчёт
-      const report = await buildPdfReport({ original, refined });
-
-      // 6) отправка
-      await tgSendDocument(chatId, report, "proofreader_report.pdf");
+      await tgSendDocument(msg.chat.id, pdf, "proofreader_report.pdf");
+      console.log("[TG] PDF обработан и отправлен ✅");
       return res.status(200).json({ ok: true });
     }
 
-    // === Обычный текст/команда /refine ===
-    const isRefine = /^\/refine\b/i.test(String(text || ""));
-    const plain = isRefine ? String(text).replace(/^\/refine\s*/i, "") : text;
-
-    if (typeof plain === "string" && plain.trim()) {
-      if (countWords(plain) > 1100) {
-        await tgSendMessage(chatId, "⚠️ Текст >1100 слов. Раздели на части и пришли отдельно.");
-        return res.status(200).json({ ok: true });
-      }
-
-      await tgSendMessage(chatId, "Принято. Обрабатываю текст…");
-      const { refined } = await refineTextWithAI(plain);
-      await tgSendMessage(chatId, refined || plain);
+    // === Команда /refine ===
+    const text = msg?.text;
+    if (text?.startsWith("/refine")) {
+      const content = text.replace("/refine", "").trim();
+      await tgSendMessage(msg.chat.id, "Обрабатываю текст...");
+      const out = await refine(content);
+      await tgSendMessage(msg.chat.id, out.refined_text);
       return res.status(200).json({ ok: true });
     }
 
-    // игнор всего остального
+    // === Ping или другое ===
+    if (text?.toLowerCase() === "ping") {
+      await tgSendMessage(msg.chat.id, "✅ Принято: «ping»");
+      return res.status(200).json({ ok: true });
+    }
+
     return res.status(200).json({ ok: true });
   } catch (e) {
-    await sleep(50);
-    try {
-      const update = req.body || {};
-      const chatId = update?.message?.chat?.id || update?.edited_message?.chat?.id;
-      if (chatId) await tgSendMessage(chatId, `Ошибка: ${String(e?.message || e)}`);
-    } catch {}
-    return res.status(200).json({ ok: false, error: String(e?.message || e) });
+    console.error("[TG] handler error:", e);
+    return res.status(200).json({ ok: false, error: String(e) });
   }
 }
+
 
