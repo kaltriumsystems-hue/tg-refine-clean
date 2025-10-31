@@ -1,10 +1,11 @@
 {
   "name": "tg-refine-clean",
- "private": true,
+  "private": true,
   "type": "module",
   "dependencies": {
     "openai": "^4.67.2",
     "pdf-parse": "^1.1.1",
-    "pdfkit": "^0.15.0"
+    "pdfkit": "^0.15.0",
+    "@vercel/node": "^3.0.21"
   }
 }
