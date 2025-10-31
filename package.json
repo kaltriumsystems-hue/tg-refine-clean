@@ -1,6 +1,4 @@
 {
   "name": "tg-refine-clean",
-  "private": true,
-  "type": "module",
-  "dependencies": {}
+  "private": true
 }
